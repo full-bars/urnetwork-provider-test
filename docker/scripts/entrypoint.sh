@@ -50,16 +50,19 @@ run_normal() {
       ;;
     jwt)
       if [ "$#" -ne 1 ]; then
-        log "ERROR: jwt mode requires exactly 1 argument (JWT token)"
+        log "ERROR: jwt mode requires exactly 1 argument (auth code)"
         exit 1
       fi
       log "Entrypoint received $# arguments: $*"
       JWT_TOKEN="$1"
       exec /app/start_jwt.sh "$JWT_TOKEN"
       ;;
+    provide)
+      exec /app/start_provide.sh
+      ;;
     *)
       log "Invalid build: $BUILD"
-      log "Valid options are: stable, nightly, jwt"
+      log "Valid options are: stable, nightly, jwt, provide"
       exit 1
       ;;
   esac
