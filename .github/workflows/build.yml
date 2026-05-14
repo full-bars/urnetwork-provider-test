@@ -1,0 +1,92 @@
+name: Build and Push
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: full-bars/urnetwork-provider-test
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version
+        id: version
+        run: echo "version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ steps.version.outputs.version }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build provider binaries
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o urnetwork-provider-linux-amd64 ./provider/
+          GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o urnetwork-provider-linux-arm64 ./provider/
+
+      - name: Package binaries
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          for ARCH in amd64 arm64; do
+            mkdir -p dist/urnetwork-provider-${ARCH}
+            cp urnetwork-provider-linux-${ARCH} dist/urnetwork-provider-${ARCH}/urnetwork
+            cp scripts/install.sh dist/urnetwork-provider-${ARCH}/
+            cp scripts/uninstall.sh dist/urnetwork-provider-${ARCH}/
+            tar -czf dist/urnetwork-provider-${VERSION}-linux-${ARCH}.tar.gz \
+              -C dist urnetwork-provider-${ARCH}
+          done
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-build
+          name: "Latest build (${{ steps.version.outputs.version }})"
+          body: |
+            Automated build from commit ${{ github.sha }}.
+            Based on urnetwork/connect PR#180 (outage log spam reduction).
+          prerelease: true
+          files: |
+            dist/urnetwork-provider-*-linux-amd64.tar.gz
+            dist/urnetwork-provider-*-linux-arm64.tar.gz
