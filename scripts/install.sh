@@ -35,14 +35,16 @@ fetch_release_url() {
     fi
 
     if command -v jq >/dev/null 2>&1; then
-        echo "$response" | jq -r ".assets[] | select(.name | test(\"$pattern\")) | .browser_download_url"
+        echo "$response" | jq -r --arg arch "$arch" \
+            '.assets[] | select(.name | startswith("urnetwork-provider-") and endswith("-linux-\($arch).tar.gz")) | .browser_download_url'
     elif command -v python3 >/dev/null 2>&1; then
         echo "$response" | python3 -c "
-import sys, json, re
+import sys, json
 data = json.load(sys.stdin)
-pat = re.compile('$pattern')
+arch = '$arch'
+suffix = '-linux-' + arch + '.tar.gz'
 for a in data.get('assets', []):
-    if pat.search(a['name']):
+    if a['name'].startswith('urnetwork-provider-') and a['name'].endswith(suffix):
         print(a['browser_download_url'])
         break
 "
