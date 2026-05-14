@@ -36,17 +36,16 @@ fetch_release_url() {
 
     if command -v jq >/dev/null 2>&1; then
         echo "$response" | jq -r --arg arch "$arch" \
-            '.assets[] | select(.name | startswith("urnetwork-provider-") and endswith("-linux-\($arch).tar.gz")) | .browser_download_url'
+            '[.assets[] | select(.name | startswith("urnetwork-provider-") and endswith("-linux-\($arch).tar.gz"))] | last | .browser_download_url'
     elif command -v python3 >/dev/null 2>&1; then
         echo "$response" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 arch = '$arch'
 suffix = '-linux-' + arch + '.tar.gz'
-for a in data.get('assets', []):
-    if a['name'].startswith('urnetwork-provider-') and a['name'].endswith(suffix):
-        print(a['browser_download_url'])
-        break
+matches = [a for a in data.get('assets', []) if a['name'].startswith('urnetwork-provider-') and a['name'].endswith(suffix)]
+if matches:
+    print(matches[-1]['browser_download_url'])
 "
     else
         err "jq or python3 is required to parse the release"
