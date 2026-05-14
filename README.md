@@ -19,7 +19,7 @@ PR#180 reduces these to at most once per minute and once per failure session res
 
 ---
 
-## Binary install (recommended for testing with tc/iptables)
+## Binary install (recommended for outage testing)
 
 ### Install
 
@@ -27,7 +27,7 @@ PR#180 reduces these to at most once per minute and once per failure session res
 curl -fsSL https://raw.githubusercontent.com/full-bars/urnetwork-provider-test/main/scripts/install.sh | sh
 ```
 
-This installs the provider binary to `~/.local/share/urnetwork-provider-test/bin/urnetwork` and registers a systemd user service.
+Installs to `~/.local/share/urnetwork-provider-test/bin/urnetwork` and registers a systemd user service.
 
 ### Authenticate
 
@@ -99,32 +99,82 @@ docker stop urnetwork-test && docker rm urnetwork-test
 
 ---
 
-## Simulating an outage (for testing)
+## Simulating an outage without breaking SSH
 
-Once the provider has warmed up and is moving traffic (~8 hours), use the following to simulate backend degradation:
+The provider needs to lose connectivity to the URnetwork platform while your SSH session stays alive. Use one of the two approaches below depending on whether you're running Docker or the binary.
 
-### Gradual degradation (high latency + packet loss)
+### Docker — container network namespace
 
-```sh
-tc qdisc add dev eth0 root netem delay 800ms loss 25%
-```
-
-### Full outage (block platform endpoints)
+Containers are already isolated. Use `nsenter` to apply rules inside the container only.
 
 ```sh
-iptables -A OUTPUT -d connect.bringyour.com -j DROP
-iptables -A OUTPUT -d api.bringyour.com -j DROP
+# Get the container's PID
+PID=$(docker inspect --format '{{.State.Pid}}' urnetwork-test)
+
+# Stage 1: degrade (high latency + packet loss)
+sudo nsenter -t $PID -n -- tc qdisc add dev eth0 root netem delay 800ms loss 25%
+
+# Stage 2: full outage
+sudo nsenter -t $PID -n -- iptables -A OUTPUT -d connect.bringyour.com -j DROP
+sudo nsenter -t $PID -n -- iptables -A OUTPUT -d api.bringyour.com -j DROP
+
+# Restore
+sudo nsenter -t $PID -n -- tc qdisc del dev eth0 root 2>/dev/null || true
+sudo nsenter -t $PID -n -- iptables -D OUTPUT -d connect.bringyour.com -j DROP
+sudo nsenter -t $PID -n -- iptables -D OUTPUT -d api.bringyour.com -j DROP
 ```
 
-### Restore
+### Binary — dedicated system user + `--uid-owner`
 
+Run the provider as its own system user. iptables rules target that UID only — your SSH session is unaffected.
+
+**One-time setup:**
 ```sh
-tc qdisc del dev eth0 root 2>/dev/null || true
-iptables -D OUTPUT -d connect.bringyour.com -j DROP
-iptables -D OUTPUT -d api.bringyour.com -j DROP
+sudo useradd -r -M -s /bin/false urnetwork-tester
+sudo mkdir -p /opt/urnetwork-test /var/lib/urnetwork-test
+sudo cp ~/.local/share/urnetwork-provider-test/bin/urnetwork /opt/urnetwork-test/urnetwork
+sudo chown -R urnetwork-tester:urnetwork-tester /opt/urnetwork-test /var/lib/urnetwork-test
 ```
 
-### Expected log behavior during outage
+**Authenticate and run:**
+```sh
+sudo -u urnetwork-tester HOME=/var/lib/urnetwork-test \
+  /opt/urnetwork-test/urnetwork auth \
+  --user_auth=YOUR@EMAIL.COM --password=YOURPASSWORD -f
+
+sudo -u urnetwork-tester HOME=/var/lib/urnetwork-test \
+  /opt/urnetwork-test/urnetwork provide 2>&1 | tee /tmp/ur-test.log
+```
+
+**Stage 1: degrade — provider UID only:**
+```sh
+sudo iptables -A OUTPUT \
+  -m owner --uid-owner urnetwork-tester \
+  -d connect.bringyour.com \
+  -m statistic --mode random --probability 0.4 -j DROP
+```
+
+**Stage 2: full outage — provider UID only:**
+```sh
+sudo iptables -A OUTPUT -m owner --uid-owner urnetwork-tester \
+  -d connect.bringyour.com -j DROP
+sudo iptables -A OUTPUT -m owner --uid-owner urnetwork-tester \
+  -d api.bringyour.com -j DROP
+```
+
+**Restore:**
+```sh
+sudo iptables -D OUTPUT -m owner --uid-owner urnetwork-tester \
+  -d connect.bringyour.com -m statistic --mode random --probability 0.4 -j DROP 2>/dev/null || true
+sudo iptables -D OUTPUT -m owner --uid-owner urnetwork-tester \
+  -d connect.bringyour.com -j DROP 2>/dev/null || true
+sudo iptables -D OUTPUT -m owner --uid-owner urnetwork-tester \
+  -d api.bringyour.com -j DROP 2>/dev/null || true
+```
+
+---
+
+## Expected log behavior during outage
 
 | | Without PR#180 | With PR#180 |
 |---|---|---|
