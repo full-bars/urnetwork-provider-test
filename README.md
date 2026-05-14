@@ -1,38 +1,140 @@
-# URnetwork Connect
+# urnetwork-provider-test
 
-A web-standards VPN marketplace with an emphasis on fast, secure internet everwhere. This project exists to create a trusted best-in-class technology for the "public VPN" market, that:
+Test build of [urnetwork/connect PR#180](https://github.com/urnetwork/connect/pull/180) — reduces log spam during backend outages.
 
-- Works on consumer devices from the normal app stores
-- Allows consumer devices to tap into existing resources to enhance the public VPN. We believe a more ubiquitous and distributed VPN will be better for consumers.
-- Emphasizes privacy, security, and availability
+**Do not use in production.** This is a test build for validating the PR changes described in [#180](https://github.com/urnetwork/connect/pull/180).
 
+---
 
-## Protocol
+## What this tests
 
-[Protocol defintion](protocol): Protobuf messages for the realtime transport protocol
+During URnetwork backend outages, two log lines previously fired on every retry cycle:
 
-[API definition](api): OpenAPI definition for the API for clients to interact with the marketplace
+```
+[contract]oob err = Timeout
+[t]auth error <id> = No successful strategy found.
+```
 
+PR#180 reduces these to at most once per minute and once per failure session respectively.
 
-## Buffer reuse
+---
 
-Anywhere in the code that returns a `[]byte` will allocate it from the shared message pool. The following rules are used:
+## Binary install (recommended for testing with tc/iptables)
 
-- When passing `[]byte` into a function that takes ownership of the `[]byte`, the final owner should return the byte to the message pool when finished. Examples of this are passing a `[]byte` to a channel and async io loop functions.
-- When passing a `[]byte` to a callback, the callback should assume the `[]byte` is valid only for the duration of the function call. The caller will return the `[]byte` to the message pool after the callbacks are processed.
+### Install
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/full-bars/urnetwork-provider-test/main/scripts/install.sh | sh
+```
 
-## Discord
+This installs the provider binary to `~/.local/share/urnetwork-provider-test/bin/urnetwork` and registers a systemd user service.
 
-[https://discord.gg/urnetwork](https://discord.gg/urnetwork)
+### Authenticate
 
+```sh
+~/.local/share/urnetwork-provider-test/bin/urnetwork auth \
+  --user_auth=YOUR@EMAIL.COM \
+  --password=YOURPASSWORD \
+  -f
+```
 
-## License
+### Start
 
-URnetwork is licenced under the [MPL 2.0](LICENSE).
+```sh
+systemctl --user enable --now urnetwork-test.service
+```
 
+### Watch logs
 
-![URnetwork](res/images/connect-project.webp "URnetwork")
+```sh
+journalctl --user -u urnetwork-test.service -f
+```
 
-[URnetwork](https://ur.io): better internet
+### Uninstall
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/full-bars/urnetwork-provider-test/main/scripts/uninstall.sh | sh
+```
+
+---
+
+## Docker
+
+### Run (password auth)
+
+```sh
+docker run -d \
+  --name urnetwork-test \
+  --restart unless-stopped \
+  -e BUILD=stable \
+  -e USER_AUTH=YOUR@EMAIL.COM \
+  -e PASSWORD=YOURPASSWORD \
+  -v ~/.urnetwork:/root/.urnetwork \
+  ghcr.io/full-bars/urnetwork-provider-test:latest
+```
+
+### Run (JWT auth)
+
+```sh
+docker run -d \
+  --name urnetwork-test \
+  --restart unless-stopped \
+  -e BUILD=jwt \
+  -v ~/.urnetwork:/root/.urnetwork \
+  ghcr.io/full-bars/urnetwork-provider-test:latest \
+  YOUR_JWT_TOKEN
+```
+
+### Watch logs
+
+```sh
+docker logs -f urnetwork-test
+```
+
+### Stop and remove
+
+```sh
+docker stop urnetwork-test && docker rm urnetwork-test
+```
+
+---
+
+## Simulating an outage (for testing)
+
+Once the provider has warmed up and is moving traffic (~8 hours), use the following to simulate backend degradation:
+
+### Gradual degradation (high latency + packet loss)
+
+```sh
+tc qdisc add dev eth0 root netem delay 800ms loss 25%
+```
+
+### Full outage (block platform endpoints)
+
+```sh
+iptables -A OUTPUT -d connect.bringyour.com -j DROP
+iptables -A OUTPUT -d api.bringyour.com -j DROP
+```
+
+### Restore
+
+```sh
+tc qdisc del dev eth0 root 2>/dev/null || true
+iptables -D OUTPUT -d connect.bringyour.com -j DROP
+iptables -D OUTPUT -d api.bringyour.com -j DROP
+```
+
+### Expected log behavior during outage
+
+| | Without PR#180 | With PR#180 |
+|---|---|---|
+| `[contract]oob err` | Every few seconds | At most once per minute |
+| `[t]auth error` | Every 5s per transport | Once per failure session |
+
+---
+
+## Related
+
+- PR: https://github.com/urnetwork/connect/pull/180
+- Bandwidth leak issue: https://github.com/urnetwork/connect/issues/181
+- Upstream repo: https://github.com/urnetwork/connect
