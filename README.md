@@ -101,76 +101,22 @@ docker stop urnetwork-test && docker rm urnetwork-test
 
 ## Simulating an outage without breaking SSH
 
-The provider needs to lose connectivity to the URnetwork platform while your SSH session stays alive. Use one of the two approaches below depending on whether you're running Docker or the binary.
+Use `tc netem` inside the container's network namespace. This operates at the NIC level and affects all traffic regardless of connection state or DNS cache — unlike iptables hostname rules which are bypassed by already-established connections and cached IPs.
 
-### Docker — container network namespace
-
-Containers are already isolated. Use `nsenter` to apply rules inside the container only.
+The container is already isolated from the host, so your SSH session is unaffected.
 
 ```sh
 # Get the container's PID
 PID=$(docker inspect --format '{{.State.Pid}}' urnetwork-test)
 
 # Stage 1: degrade (high latency + packet loss)
-sudo nsenter -t $PID -n -- tc qdisc add dev eth0 root netem delay 800ms loss 25%
-
-# Stage 2: full outage
-sudo nsenter -t $PID -n -- iptables -A OUTPUT -d connect.bringyour.com -j DROP
-sudo nsenter -t $PID -n -- iptables -A OUTPUT -d api.bringyour.com -j DROP
+sudo nsenter -t $PID -n -- tc qdisc add dev eth0 root netem delay 2000ms loss 50%
 
 # Restore
 sudo nsenter -t $PID -n -- tc qdisc del dev eth0 root 2>/dev/null || true
-sudo nsenter -t $PID -n -- iptables -D OUTPUT -d connect.bringyour.com -j DROP
-sudo nsenter -t $PID -n -- iptables -D OUTPUT -d api.bringyour.com -j DROP
 ```
 
-### Binary — dedicated system user + `--uid-owner`
-
-Run the provider as its own system user. iptables rules target that UID only — your SSH session is unaffected.
-
-**One-time setup:**
-```sh
-sudo useradd -r -M -s /bin/false urnetwork-tester
-sudo mkdir -p /opt/urnetwork-test /var/lib/urnetwork-test
-sudo cp ~/.local/share/urnetwork-provider-test/bin/urnetwork /opt/urnetwork-test/urnetwork
-sudo chown -R urnetwork-tester:urnetwork-tester /opt/urnetwork-test /var/lib/urnetwork-test
-```
-
-**Authenticate and run:**
-```sh
-sudo -u urnetwork-tester HOME=/var/lib/urnetwork-test \
-  /opt/urnetwork-test/urnetwork auth \
-  --user_auth=YOUR@EMAIL.COM --password=YOURPASSWORD -f
-
-sudo -u urnetwork-tester HOME=/var/lib/urnetwork-test \
-  /opt/urnetwork-test/urnetwork provide 2>&1 | tee /tmp/ur-test.log
-```
-
-**Stage 1: degrade — provider UID only:**
-```sh
-sudo iptables -A OUTPUT \
-  -m owner --uid-owner urnetwork-tester \
-  -d connect.bringyour.com \
-  -m statistic --mode random --probability 0.4 -j DROP
-```
-
-**Stage 2: full outage — provider UID only:**
-```sh
-sudo iptables -A OUTPUT -m owner --uid-owner urnetwork-tester \
-  -d connect.bringyour.com -j DROP
-sudo iptables -A OUTPUT -m owner --uid-owner urnetwork-tester \
-  -d api.bringyour.com -j DROP
-```
-
-**Restore:**
-```sh
-sudo iptables -D OUTPUT -m owner --uid-owner urnetwork-tester \
-  -d connect.bringyour.com -m statistic --mode random --probability 0.4 -j DROP 2>/dev/null || true
-sudo iptables -D OUTPUT -m owner --uid-owner urnetwork-tester \
-  -d connect.bringyour.com -j DROP 2>/dev/null || true
-sudo iptables -D OUTPUT -m owner --uid-owner urnetwork-tester \
-  -d api.bringyour.com -j DROP 2>/dev/null || true
-```
+**Note:** `iptables -d hostname` rules were tested and found ineffective — the provider resolves platform hostnames at startup and maintains persistent connections, so hostname-based DROP rules have no effect on already-established or cached sessions. `tc netem` is the correct tool for this test.
 
 ---
 
@@ -178,8 +124,8 @@ sudo iptables -D OUTPUT -m owner --uid-owner urnetwork-tester \
 
 | | Without PR#180 | With PR#180 |
 |---|---|---|
-| `[contract]oob err` | Every few seconds | At most once per minute |
-| `[t]auth error` | Every 5s per transport | Once per failure session |
+| `[contract]oob err` | Every few seconds | At most once per minute (atomic check-and-set) |
+| `[t]auth error` | Every 5s per transport | At most once per minute globally across all transports |
 
 ---
 
