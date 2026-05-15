@@ -82,7 +82,7 @@ docker run -d \
   -e BUILD=jwt \
   -v ~/.urnetwork:/root/.urnetwork \
   ghcr.io/full-bars/urnetwork-provider-test:latest \
-  YOUR_JWT_TOKEN
+  YOUR_AUTH_TOKEN
 ```
 
 ### Watch logs
