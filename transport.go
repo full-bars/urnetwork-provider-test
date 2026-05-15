@@ -379,18 +379,27 @@ func isBetterMode(current TransportMode, other TransportMode) bool {
 	return transportModePreferences[current] < transportModePreferences[other]
 }
 
-// lastAuthErrLogNano is a package-level atomic timestamp (unix nanoseconds) shared
+// lastAuthErrLogNano and suppressedAuthErrCount are package-level atomics shared
 // across all PlatformTransport instances, rate-limiting [t]auth error log lines to
-// at most once per minute regardless of how many transports time out simultaneously.
+// at most once per minute and tracking how many were suppressed in the interval.
 var lastAuthErrLogNano atomic.Int64
+var suppressedAuthErrCount atomic.Int64
 
-func shouldLogAuthErr() bool {
+// shouldLogAuthErr returns (true, suppressedCount) if a log line should be emitted,
+// resetting the suppressed counter. Returns (false, 0) if the error is suppressed.
+func shouldLogAuthErr() (bool, int64) {
 	now := time.Now().UnixNano()
 	last := lastAuthErrLogNano.Load()
 	if now-last < int64(time.Minute) {
-		return false
+		suppressedAuthErrCount.Add(1)
+		return false, 0
 	}
-	return lastAuthErrLogNano.CompareAndSwap(last, now)
+	if !lastAuthErrLogNano.CompareAndSwap(last, now) {
+		suppressedAuthErrCount.Add(1)
+		return false, 0
+	}
+	suppressed := suppressedAuthErrCount.Swap(0)
+	return true, suppressed
 }
 
 func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
@@ -498,9 +507,17 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 			ws, err = connect()
 		}
 		if err != nil {
-			if !authErrLogged && shouldLogAuthErr() {
-				glog.Infof("[t]auth error %s = %s\n", clientId, err)
-				authErrLogged = true
+			if !authErrLogged {
+				if ok, suppressed := shouldLogAuthErr(); ok {
+					if suppressed > 0 {
+						glog.Infof("[t]auth error %s = %s (%d suppressed)\n", clientId, err, suppressed)
+					} else {
+						glog.Infof("[t]auth error %s = %s\n", clientId, err)
+					}
+					authErrLogged = true
+				} else {
+					glog.V(1).Infof("[t]auth error %s = %s\n", clientId, err)
+				}
 			} else {
 				glog.V(1).Infof("[t]auth error %s = %s\n", clientId, err)
 			}
@@ -1043,9 +1060,17 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 			connStream, err = connect()
 		}
 		if err != nil {
-			if !authErrLogged && shouldLogAuthErr() {
-				glog.Infof("[t]auth error %s = %s\n", clientId, err)
-				authErrLogged = true
+			if !authErrLogged {
+				if ok, suppressed := shouldLogAuthErr(); ok {
+					if suppressed > 0 {
+						glog.Infof("[t]auth error %s = %s (%d suppressed)\n", clientId, err, suppressed)
+					} else {
+						glog.Infof("[t]auth error %s = %s\n", clientId, err)
+					}
+					authErrLogged = true
+				} else {
+					glog.V(1).Infof("[t]auth error %s = %s\n", clientId, err)
+				}
 			} else {
 				glog.V(1).Infof("[t]auth error %s = %s\n", clientId, err)
 			}
