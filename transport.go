@@ -181,8 +181,6 @@ type PlatformTransport struct {
 	targetMode     TransportMode
 	mode           TransportMode
 
-	authErrMu      sync.Mutex
-	lastAuthErrLog time.Time
 }
 
 func NewPlatformTransportWithDefaults(
@@ -381,14 +379,18 @@ func isBetterMode(current TransportMode, other TransportMode) bool {
 	return transportModePreferences[current] < transportModePreferences[other]
 }
 
-func (self *PlatformTransport) shouldLogAuthErr() bool {
-	self.authErrMu.Lock()
-	defer self.authErrMu.Unlock()
-	if time.Since(self.lastAuthErrLog) < time.Minute {
+// lastAuthErrLogNano is a package-level atomic timestamp (unix nanoseconds) shared
+// across all PlatformTransport instances, rate-limiting [t]auth error log lines to
+// at most once per minute regardless of how many transports time out simultaneously.
+var lastAuthErrLogNano atomic.Int64
+
+func shouldLogAuthErr() bool {
+	now := time.Now().UnixNano()
+	last := lastAuthErrLogNano.Load()
+	if now-last < int64(time.Minute) {
 		return false
 	}
-	self.lastAuthErrLog = time.Now()
-	return true
+	return lastAuthErrLogNano.CompareAndSwap(last, now)
 }
 
 func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
@@ -496,7 +498,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 			ws, err = connect()
 		}
 		if err != nil {
-			if !authErrLogged && self.shouldLogAuthErr() {
+			if !authErrLogged && shouldLogAuthErr() {
 				glog.Infof("[t]auth error %s = %s\n", clientId, err)
 				authErrLogged = true
 			} else {
@@ -1041,7 +1043,7 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 			connStream, err = connect()
 		}
 		if err != nil {
-			if !authErrLogged && self.shouldLogAuthErr() {
+			if !authErrLogged && shouldLogAuthErr() {
 				glog.Infof("[t]auth error %s = %s\n", clientId, err)
 				authErrLogged = true
 			} else {
